@@ -429,13 +429,13 @@ func (e *Engine) buildSnapshot(req SnapshotRequest) Snapshot {
 }
 
 func (e *Engine) collectFilteredLines() ([]string, []model.Level) {
-	lines, levelsRaw := e.collectLines()
-	levels := convertLevels(levelsRaw)
 	cache := &e.filterCache
 	version := e.currentBufferVersion()
 	if cache.version == version && cache.sourceKey == e.filters.SourceKey && cache.levelMask == e.filters.LevelMask && cache.search == e.filters.SearchText {
 		return cache.lines, cache.levels
 	}
+	lines, levelsRaw := e.collectLines()
+	levels := convertLevels(levelsRaw)
 	if e.filters.SearchText != "" {
 		lines, levels = filterLines(lines, levels, e.filters.SearchText)
 	}
