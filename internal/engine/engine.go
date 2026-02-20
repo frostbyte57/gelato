@@ -99,6 +99,7 @@ type Engine struct {
 	snapReqCh  chan SnapshotRequest
 	snapRespCh chan Snapshot
 	eventCh    []chan model.LogEvent
+	ingestCh   chan model.LogEvent
 
 	listeners          map[string]model.Listener
 	sources            map[string]*model.Source
@@ -125,6 +126,10 @@ type Engine struct {
 	errorsPerMin *store.RollingCounter
 	dropsPerMin  *store.RollingCounter
 
+	asyncIngest    bool
+	pendingLogs    uint64
+	drainBatchSize int
+
 	lastID           uint64
 	lastDroppedTotal uint64
 	dropUpdates      chan server.EngineStatsUpdate
@@ -137,6 +142,11 @@ type Engine struct {
 }
 
 func New(limits config.Limits) *Engine {
+	drainBatch := limits.DrainBatchSize
+	if drainBatch <= 0 {
+		drainBatch = 256
+	}
+
 	engine := &Engine{
 		limits:             limits,
 		uiCmdCh:            make(chan Command, 64),
@@ -165,10 +175,20 @@ func New(limits config.Limits) *Engine {
 		lastDroppedTotal:   0,
 		dropUpdates:        make(chan server.EngineStatsUpdate, 1024),
 		statAgg:            newStatsAggregator(256),
+		asyncIngest:        limits.AsyncIngest,
+		drainBatchSize:     drainBatch,
 	}
 
 	for i := range engine.eventCh {
 		engine.eventCh[i] = make(chan model.LogEvent, limits.QueueSizePerShard)
+	}
+
+	if engine.asyncIngest {
+		queueSize := limits.IngestQueueSize
+		if queueSize <= 0 {
+			queueSize = limits.ShardCount * 512
+		}
+		engine.ingestCh = make(chan model.LogEvent, queueSize)
 	}
 
 	return engine
@@ -222,10 +242,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 
+	if e.asyncIngest {
+		e.startAsyncIngest(ctx)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case evt := <-e.ingestCh:
+			e.consumeIngestEvent(evt)
+			e.drainIngestBurst()
 		case cmd := <-e.uiCmdCh:
 			if err := e.handleCommand(cmd); err != nil {
 				e.errors++
@@ -239,9 +266,64 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.flushStats(time.Now())
 
 		case <-tick.C:
-			e.drainEvents(256)
+			now := time.Now()
+			if e.asyncIngest {
+				e.flushPendingLogs(now)
+			} else {
+				processed := e.drainEvents(now, e.drainBatchSize)
+				if processed > 0 {
+					e.logsPerSec.Add(processed, now)
+				}
+			}
 		}
 	}
+}
+
+func (e *Engine) startAsyncIngest(ctx context.Context) {
+	for i := range e.eventCh {
+		ch := e.eventCh[i]
+		go func(input <-chan model.LogEvent) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case evt := <-input:
+					select {
+					case e.ingestCh <- evt:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}(ch)
+	}
+}
+
+func (e *Engine) consumeIngestEvent(evt model.LogEvent) {
+	e.applyEvent(evt, time.Now())
+	e.pendingLogs++
+}
+
+func (e *Engine) drainIngestBurst() {
+	if e.ingestCh == nil {
+		return
+	}
+	for i := 0; i < 32; i++ {
+		select {
+		case evt := <-e.ingestCh:
+			e.consumeIngestEvent(evt)
+		default:
+			return
+		}
+	}
+}
+
+func (e *Engine) flushPendingLogs(now time.Time) {
+	if e.pendingLogs == 0 {
+		return
+	}
+	e.logsPerSec.Add(e.pendingLogs, now)
+	e.pendingLogs = 0
 }
 
 func (e *Engine) AssignShard(sourceKey string) int {
@@ -274,24 +356,31 @@ func (e *Engine) handleCommand(cmd Command) error {
 	}
 }
 
-func (e *Engine) drainEvents(batchSize int) {
-	now := time.Now()
+func (e *Engine) drainEvents(now time.Time, batchSize int) uint64 {
+	if batchSize <= 0 {
+		batchSize = 256
+	}
 	processed := uint64(0)
+	maxExtra := batchSize * 4
 	for _, ch := range e.eventCh {
-		for i := 0; i < batchSize; i++ {
+		limit := batchSize
+		if pending := len(ch); pending > limit {
+			limit = pending
+			if limit > maxExtra {
+				limit = maxExtra
+			}
+		}
+		for i := 0; i < limit; i++ {
 			select {
 			case evt := <-ch:
 				e.applyEvent(evt, now)
 				processed++
 			default:
-				i = batchSize
+				i = limit
 			}
 		}
 	}
-	if processed > 0 {
-		e.logsPerSec.Add(processed, now)
-	}
-
+	return processed
 }
 
 func (e *Engine) applyEvent(evt model.LogEvent, now time.Time) {

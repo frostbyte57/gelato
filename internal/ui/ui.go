@@ -46,6 +46,8 @@ type Model struct {
 	levelMask    uint32
 	sourceFilter string
 	sourceIndex  int
+
+	statsCache statsView
 }
 
 func New(
@@ -86,6 +88,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selected >= len(m.snapshot.Listeners) {
 			m.selected = max(0, len(m.snapshot.Listeners)-1)
 		}
+		m.statsCache.invalidate()
 		return m, nil
 	case cmdResultMsg:
 		result := engine.CommandResult(typed)
@@ -227,11 +230,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+type statsView struct {
+	valid   bool
+	logs    string
+	errors  string
+	drops   string
+	summary string
+	legend  string
+}
+
+func (s *statsView) invalidate() {
+	s.valid = false
+}
+
+func (s *statsView) ensure(snapshot engine.Snapshot) {
+	if s.valid {
+		return
+	}
+	logs := sparkline(snapshot.Stats.LogsPerSec)
+	errors := sparkline(snapshot.Stats.ErrorsPerMin)
+	drops := sparkline(snapshot.Stats.DropsPerMin)
+	s.logs = "logs/s  " + logs
+	s.errors = "errors  " + errors
+	s.drops = "drops   " + drops
+	s.summary = fmt.Sprintf("totals: logs=%d errors=%d drops=%d", sum(snapshot.Stats.LogsPerSec), snapshot.Errors, snapshot.Dropped)
+	s.legend = "legend: / search  c clear  1 info 2 warn 3 error 4 debug  f follow"
+	s.valid = true
+}
+
 func (m Model) View() string {
 	styles := buildStyles(m.noColor)
 	width := normalizeWidth(m.width)
 
-	logo := renderLogo(width)
+	logo := renderLogo(width, styles)
 	chrome := styles.bar.Width(width).Render(renderHeaderMeta(styles))
 
 	sidebarWidth := 26
@@ -252,52 +283,92 @@ func (m Model) View() string {
 
 	status := styles.status.Width(width).Render(renderStatus(m, styles))
 
-	return lipgloss.JoinVertical(lipgloss.Left, logo, chrome, body, status)
+	layout := lipgloss.JoinVertical(lipgloss.Left, logo, chrome, body, status)
+	return styles.canvas.Render(layout)
 }
 
 type uiStyles struct {
-	header   lipgloss.Style
-	meta     lipgloss.Style
-	bar      lipgloss.Style
-	tabs     lipgloss.Style
-	panel    lipgloss.Style
-	sidebar  lipgloss.Style
-	status   lipgloss.Style
-	active   lipgloss.Style
-	inactive lipgloss.Style
-	muted    lipgloss.Style
-	accent   lipgloss.Style
-	warn     lipgloss.Style
-	good     lipgloss.Style
-	bad      lipgloss.Style
+	header    lipgloss.Style
+	meta      lipgloss.Style
+	bar       lipgloss.Style
+	panel     lipgloss.Style
+	sidebar   lipgloss.Style
+	status    lipgloss.Style
+	active    lipgloss.Style
+	inactive  lipgloss.Style
+	muted     lipgloss.Style
+	accent    lipgloss.Style
+	warn      lipgloss.Style
+	good      lipgloss.Style
+	bad       lipgloss.Style
+	canvas    lipgloss.Style
+	logo      lipgloss.Style
+	chipLabel lipgloss.Style
+	chipValue lipgloss.Style
 }
 
 func buildStyles(noColor bool) uiStyles {
-	border := lipgloss.Border{
-		Top: "-", Bottom: "-", Left: "|", Right: "|",
-		TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
+	if noColor {
+		border := lipgloss.Border{
+			Top: "-", Bottom: "-", Left: "|", Right: "|",
+			TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
+		}
+		return uiStyles{
+			header:    lipgloss.NewStyle().Bold(true),
+			meta:      lipgloss.NewStyle(),
+			bar:       lipgloss.NewStyle().Padding(0, 1).Border(border),
+			panel:     lipgloss.NewStyle().Padding(1, 1).Border(border),
+			sidebar:   lipgloss.NewStyle().Padding(1, 1).Border(border),
+			status:    lipgloss.NewStyle().Padding(0, 1).Border(border),
+			active:    lipgloss.NewStyle().Bold(true),
+			inactive:  lipgloss.NewStyle(),
+			muted:     lipgloss.NewStyle(),
+			accent:    lipgloss.NewStyle(),
+			warn:      lipgloss.NewStyle(),
+			good:      lipgloss.NewStyle(),
+			bad:       lipgloss.NewStyle(),
+			canvas:    lipgloss.NewStyle(),
+			logo:      lipgloss.NewStyle(),
+			chipLabel: lipgloss.NewStyle(),
+			chipValue: lipgloss.NewStyle(),
+		}
 	}
-	accent := lipgloss.Color("6")
-	accentAlt := lipgloss.Color("5")
-	muted := lipgloss.Color("8")
-	good := lipgloss.Color("2")
-	warn := lipgloss.Color("3")
-	bad := lipgloss.Color("1")
+
+	border := lipgloss.Border{
+		Top: "─", Bottom: "─", Left: "│", Right: "│",
+		TopLeft: "╭", TopRight: "╮", BottomLeft: "╰", BottomRight: "╯",
+	}
+
+	primary := lipgloss.Color("#C084FC")
+	secondary := lipgloss.Color("#22D3EE")
+	accentAlt := lipgloss.Color("#F472B6")
+	muted := lipgloss.Color("#94A3B8")
+	bg := lipgloss.Color("#05060A")
+	panelBg := lipgloss.Color("#0F172A")
+	sidebarBg := lipgloss.Color("#0C1222")
+	statusBg := lipgloss.Color("#090F1C")
+	good := lipgloss.Color("#10B981")
+	warn := lipgloss.Color("#FBBF24")
+	bad := lipgloss.Color("#F87171")
+
 	return uiStyles{
-		header:   lipgloss.NewStyle().Bold(true).Foreground(accent),
-		meta:     lipgloss.NewStyle().Foreground(muted),
-		bar:      lipgloss.NewStyle().Padding(0, 1).Border(border).BorderForeground(accentAlt),
-		tabs:     lipgloss.NewStyle().Padding(0, 1).Border(border).BorderForeground(muted),
-		panel:    lipgloss.NewStyle().Padding(1, 1).Border(border).BorderForeground(accentAlt),
-		sidebar:  lipgloss.NewStyle().Padding(1, 1).Border(border).BorderForeground(muted),
-		status:   lipgloss.NewStyle().Padding(0, 1).Border(border).BorderForeground(muted),
-		active:   lipgloss.NewStyle().Bold(true).Foreground(accent),
-		inactive: lipgloss.NewStyle().Foreground(muted),
-		muted:    lipgloss.NewStyle().Foreground(muted),
-		accent:   lipgloss.NewStyle().Foreground(accentAlt),
-		warn:     lipgloss.NewStyle().Foreground(warn),
-		good:     lipgloss.NewStyle().Foreground(good),
-		bad:      lipgloss.NewStyle().Foreground(bad),
+		header:    lipgloss.NewStyle().Bold(true).Foreground(secondary),
+		meta:      lipgloss.NewStyle().Foreground(muted),
+		bar:       lipgloss.NewStyle().Padding(0, 2).Border(border).BorderForeground(primary).Background(lipgloss.Color("#111A2B")),
+		panel:     lipgloss.NewStyle().Padding(1, 2).Border(border).BorderForeground(primary).Background(panelBg),
+		sidebar:   lipgloss.NewStyle().Padding(1, 2).Border(border).BorderForeground(secondary).Background(sidebarBg),
+		status:    lipgloss.NewStyle().Padding(0, 2).Border(border).BorderForeground(secondary).Background(statusBg),
+		active:    lipgloss.NewStyle().Bold(true).Foreground(secondary).Background(lipgloss.Color("#1F1B4B")).Padding(0, 1),
+		inactive:  lipgloss.NewStyle().Foreground(muted),
+		muted:     lipgloss.NewStyle().Foreground(muted),
+		accent:    lipgloss.NewStyle().Foreground(accentAlt).Bold(true),
+		warn:      lipgloss.NewStyle().Foreground(warn).Bold(true),
+		good:      lipgloss.NewStyle().Foreground(good).Bold(true),
+		bad:       lipgloss.NewStyle().Foreground(bad).Bold(true),
+		canvas:    lipgloss.NewStyle().Foreground(lipgloss.Color("#E2E8F0")).Background(bg).Padding(1, 2),
+		logo:      lipgloss.NewStyle().Background(bg).Padding(1, 2),
+		chipLabel: lipgloss.NewStyle().Foreground(muted).Bold(true),
+		chipValue: lipgloss.NewStyle().Foreground(secondary),
 	}
 }
 
@@ -308,34 +379,38 @@ func normalizeWidth(width int) int {
 	return width
 }
 
-func renderLogo(width int) string {
+func renderLogo(width int, styles uiStyles) string {
 	logo := []string{
-		"▄████ ▓█████  ██▓    ▄▄▄     ▄▄▄█████▓ ▒█████  ",
-		"██▒ ▀█▒▓█   ▀ ▓██▒   ▒████▄   ▓  ██▒ ▓▒▒██▒  ██▒",
-		"▒██░▄▄▄░▒███   ▒██░   ▒██  ▀█▄ ▒ ▓██░ ▒░▒██░  ██▒",
-		"░▓█  ██▓▒▓█  ▄ ▒██░   ░██▄▄▄▄██░ ▓██▓ ░ ▒██   ██░",
-		"░▒▓███▀▒░▒████▒░██████▒▓█   ▓██▒ ▒██▒ ░ ░ ████▓▒░",
-		" ░▒   ▒ ░░ ▒░ ░░ ▒░▓  ░▒▒   ▓▒█░ ▒ ░░   ░ ▒░▒░▒░ ",
-		"  ░   ░  ░ ░  ░░ ░ ▒  ░ ▒   ▒▒ ░   ░      ░ ▒ ▒░ ",
-		"░ ░   ░    ░     ░ ░    ░   ▒    ░      ░ ░ ░ ▒  ",
-		"      ░    ░  ░    ░  ░     ░  ░            ░ ░  ",
+		" ██████╗ ███████╗██╗      █████╗ ████████╗ ██████╗ ",
+		"██╔════╝ ██╔════╝██║     ██╔══██╗╚══██╔══╝██╔═══██╗",
+		"██║  ███╗█████╗  ██║     ███████║   ██║   ██║   ██║",
+		"██║   ██║██╔══╝  ██║     ██╔══██║   ██║   ██║   ██║",
+		"╚██████╔╝███████╗███████╗██║  ██║   ██║   ╚██████╔╝",
+		" ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ",
+		"        multi-scoop log gelateria terminal         ",
 	}
 	colored := make([]string, 0, len(logo))
 	for _, line := range logo {
 		colored = append(colored, rainbow(line))
 	}
-	pad := lipgloss.NewStyle().Padding(0, 1)
-	return pad.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, colored...))
+	return styles.logo.Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, colored...))
 }
 
 func renderHeaderMeta(styles uiStyles) string {
-	left := styles.header.Render("Gelato")
-	right := styles.meta.Render("multi-listener log console | tcp")
+	left := styles.header.Render(rainbow("Gelato"))
+	right := styles.meta.Render("multi-listener log console · tcp ingestion")
 	return lipgloss.JoinHorizontal(lipgloss.Left, left, "  ", right)
 }
 
 func rainbow(text string) string {
-	colors := []lipgloss.Color{"1", "3", "2", "6", "4", "5"}
+	colors := []lipgloss.Color{
+		lipgloss.Color("#F472B6"),
+		lipgloss.Color("#C084FC"),
+		lipgloss.Color("#60A5FA"),
+		lipgloss.Color("#34D399"),
+		lipgloss.Color("#FBBF24"),
+		lipgloss.Color("#F97316"),
+	}
 	var out strings.Builder
 	colorIndex := 0
 	for _, r := range text {
@@ -359,14 +434,14 @@ func renderSidebar(m Model, styles uiStyles) string {
 		viewLine(m, styles, "filters"),
 		"",
 		styles.accent.Render("FILTERS"),
-		chipLine("search", emptyDash(m.filterText)),
-		chipLine("source", emptyDash(m.sourceFilter)),
-		chipLine("levels", levelLabel(m.levelMask)),
+		chipLine(styles, "search", emptyDash(m.filterText)),
+		chipLine(styles, "source", emptyDash(m.sourceFilter)),
+		chipLine(styles, "levels", levelLabel(m.levelMask)),
 		"",
 		styles.accent.Render("STATS"),
-		fmt.Sprintf("logs/s: %d", lastValue(m.snapshot.Stats.LogsPerSec)),
-		fmt.Sprintf("errors: %d", lastValue(m.snapshot.Stats.ErrorsPerMin)),
-		fmt.Sprintf("drops: %d", lastValue(m.snapshot.Stats.DropsPerMin)),
+		styles.good.Render(fmt.Sprintf("logs/s: %d", lastValue(m.snapshot.Stats.LogsPerSec))),
+		styles.warn.Render(fmt.Sprintf("errors: %d", lastValue(m.snapshot.Stats.ErrorsPerMin))),
+		styles.bad.Render(fmt.Sprintf("drops: %d", lastValue(m.snapshot.Stats.DropsPerMin))),
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
@@ -479,22 +554,35 @@ func renderViewContent(m Model) string {
 }
 
 func renderStatus(m Model, styles uiStyles) string {
-	left := "tab switch  / filter  c clear  1-4 levels  ctrl+a add  ctrl+d remove  ctrl+r retry  f follow  q quit"
-	if m.view == "sources" {
-		left += "  m mute  x clear"
+	key := func(combo, desc string) string {
+		return styles.accent.Render(combo) + styles.muted.Render(" "+desc)
 	}
-	status := left
-	status += "  | view: " + strings.ToUpper(m.view)
+	parts := []string{
+		key("tab", "views"),
+		key("/", "filter"),
+		key("c", "clear"),
+		key("1-4", "levels"),
+		key("ctrl+a", "add"),
+		key("ctrl+d", "remove"),
+		key("ctrl+r", "retry"),
+		key("f", "follow"),
+		key("q", "quit"),
+	}
+	if m.view == "sources" {
+		parts = append(parts, key("m", "mute"), key("x", "purge"))
+	}
+	status := strings.Join(parts, "  ")
+	status += styles.muted.Render("  | view: " + strings.ToUpper(m.view))
 	if m.sourceFilter != "" {
-		status += "  | source: " + m.sourceFilter
+		status += styles.muted.Render("  | source: " + m.sourceFilter)
 	}
 	if m.filterText != "" {
-		status += "  | filter: " + m.filterText
+		status += styles.muted.Render("  | filter: " + m.filterText)
 	}
 	if m.view == "dashboard" && !m.follow {
-		status += "  | paused"
+		status += styles.warn.Render("  | paused")
 	}
-	return styles.muted.Render(status)
+	return status
 }
 
 func Run(noColor bool, statePath string) error {
@@ -766,7 +854,9 @@ func renderListeners(m Model) []string {
 		if listener.ErrMsg != "" {
 			line = fmt.Sprintf("%s (%s)", line, listener.ErrMsg)
 		}
-		lines = append(lines, styleByErrors(line, stats.Errors))
+		line = styleByErrors(line, stats.Errors)
+		line = highlightActive(line, i == m.selected)
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -788,7 +878,8 @@ func renderDashboard(m Model) []string {
 	}
 	lines := []string{header}
 	lines = append(lines, renderKpis(m)...)
-	lines = append(lines, renderStats(m)...)
+	statsLines := renderStats(m)
+	lines = append(lines, statsLines...)
 	logLines := m.snapshot.Lines
 	if len(logLines) == 0 {
 		if m.filterText != "" {
@@ -797,7 +888,7 @@ func renderDashboard(m Model) []string {
 		return append(lines, "(no logs yet)")
 	}
 
-	viewport := m.height - 5 - len(renderStats(m))
+	viewport := m.height - 5 - len(statsLines)
 	if viewport < 5 {
 		viewport = 5
 	}
@@ -823,18 +914,14 @@ func renderDashboard(m Model) []string {
 }
 
 func renderStats(m Model) []string {
-	logs := sparkline(m.snapshot.Stats.LogsPerSec)
-	errors := sparkline(m.snapshot.Stats.ErrorsPerMin)
-	drops := sparkline(m.snapshot.Stats.DropsPerMin)
-	summary := fmt.Sprintf("totals: logs=%d errors=%d drops=%d", sum(m.snapshot.Stats.LogsPerSec), m.snapshot.Errors, m.snapshot.Dropped)
-	lines := []string{
-		fmt.Sprintf("logs/s  %s", logs),
-		fmt.Sprintf("errors  %s", errors),
-		fmt.Sprintf("drops   %s", drops),
-		summary,
-		"legend: / search  c clear  1 info 2 warn 3 error 4 debug  f follow",
+	m.statsCache.ensure(m.snapshot)
+	return []string{
+		m.statsCache.logs,
+		m.statsCache.errors,
+		m.statsCache.drops,
+		m.statsCache.summary,
+		m.statsCache.legend,
 	}
-	return lines
 }
 
 func renderKpis(m Model) []string {
@@ -849,8 +936,14 @@ func renderKpis(m Model) []string {
 }
 
 func chip(label, value string) string {
-	inner := lipgloss.NewStyle().Bold(true).Render(label+":") + " " + value
-	return lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.Border{Left: "[", Right: "]"}).Render(inner)
+	labelStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("#C084FC")).Bold(true).Render(label)
+	valueStyled := lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A")).Bold(true).Render(value)
+	return lipgloss.NewStyle().
+		Padding(0, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#7C3AED")).
+		Background(lipgloss.Color("#1B1037")).
+		Render(labelStyled + " " + valueStyled)
 }
 
 func sparkline(values []uint64) string {
@@ -910,7 +1003,12 @@ func renderSources(m Model) []string {
 			rate,
 			dropRate,
 		)
-		lines = append(lines, styleByErrors(line, source.Errors))
+		line = styleByErrors(line, source.Errors)
+		line = highlightActive(line, i == m.sourceIndex && m.view == "sources")
+		if m.sourceFilter == source.Key {
+			line = lipgloss.NewStyle().Underline(true).Render(line)
+		}
+		lines = append(lines, line)
 	}
 	if len(m.snapshot.Sources) > limit {
 		lines = append(lines, fmt.Sprintf("... %d more", len(m.snapshot.Sources)-limit))
@@ -943,10 +1041,25 @@ func emptyDash(value string) string {
 	return value
 }
 
-func chipLine(label, value string) string {
-	left := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(label + ":")
-	right := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Render(value)
+func chipLine(styles uiStyles, label, value string) string {
+	left := styles.chipLabel.Render(label + ":")
+	right := styles.chipValue.Render(value)
 	return left + " " + right
+}
+
+var (
+	selectedRowStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1E1B4B")).
+				Foreground(lipgloss.Color("#F8FAFC")).
+				Bold(true)
+	errorRowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171"))
+)
+
+func highlightActive(line string, active bool) string {
+	if !active {
+		return line
+	}
+	return selectedRowStyle.Render(line)
 }
 
 func formatRate(values []uint64) string {
@@ -961,19 +1074,19 @@ func styleByErrors(line string, errors uint64) string {
 	if errors == 0 {
 		return line
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(line)
+	return errorRowStyle.Render(line)
 }
 
 func statusBadge(status string) string {
 	switch status {
 	case "listening":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[ok]")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render("[ok]")
 	case "starting":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("[boot]")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("[boot]")
 	case "error":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("[err]")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Render("[err]")
 	case "stopped":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("[stop]")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8")).Render("[stop]")
 	default:
 		return "[?]"
 	}
@@ -981,9 +1094,9 @@ func statusBadge(status string) string {
 
 func sourceBadge(errors uint64) string {
 	if errors == 0 {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[ok]")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Render("[ok]")
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("[err]")
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Render("[err]")
 }
 
 func sum(values []uint64) uint64 {
@@ -1037,13 +1150,13 @@ func formatLogLine(levels []model.Level, idx int, line string) string {
 	if idx < len(levels) {
 		switch levels[idx] {
 		case model.LevelError:
-			return levelStyle("9").Render(prefix+" [ERROR]") + " " + line
+			return levelStyle("#F87171").Render(prefix+" [ERROR]") + " " + line
 		case model.LevelWarn:
-			return levelStyle("11").Render(prefix+" [WARN]") + " " + line
+			return levelStyle("#FBBF24").Render(prefix+" [WARN]") + " " + line
 		case model.LevelInfo:
-			return levelStyle("12").Render(prefix+" [INFO]") + " " + line
+			return levelStyle("#60A5FA").Render(prefix+" [INFO]") + " " + line
 		case model.LevelDebug:
-			return levelStyle("8").Render(prefix+" [DEBUG]") + " " + line
+			return levelStyle("#94A3B8").Render(prefix+" [DEBUG]") + " " + line
 		default:
 			return prefix + " [----] " + line
 		}
@@ -1052,7 +1165,7 @@ func formatLogLine(levels []model.Level, idx int, line string) string {
 }
 
 func levelStyle(color string) lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 }
 
 func formatStatus(listener model.Listener) string {

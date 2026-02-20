@@ -13,9 +13,13 @@ type Limits struct {
 	QueueSizePerShard    int
 	MaxConnsGlobal       int
 	MaxConnsPerListener  int
+	DrainBatchSize       int
+	AsyncIngest          bool
+	IngestQueueSize      int
 }
 
 func DefaultLimits() Limits {
+	shards := defaultShardCount()
 	return Limits{
 		DefaultBindHost:      "127.0.0.1",
 		DefaultPort:          9000,
@@ -23,10 +27,13 @@ func DefaultLimits() Limits {
 		MaxSources:           500,
 		PerSourceBufferLines: 5000,
 		GlobalBufferLines:    20000,
-		ShardCount:           defaultShardCount(),
+		ShardCount:           shards,
 		QueueSizePerShard:    10000,
 		MaxConnsGlobal:       2000,
 		MaxConnsPerListener:  500,
+		DrainBatchSize:       512,
+		AsyncIngest:          true,
+		IngestQueueSize:      shards * 1024,
 	}
 }
 
