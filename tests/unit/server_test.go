@@ -1,4 +1,4 @@
-package server
+package unit
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"gelato/internal/config"
 	"gelato/internal/model"
+	"gelato/internal/server"
 )
 
 func TestDetectLevel(t *testing.T) {
@@ -23,7 +24,7 @@ func TestDetectLevel(t *testing.T) {
 		"[unknown severity]": model.LevelUnknown,
 	}
 	for input, expected := range cases {
-		if got := detectLevel(input); got != expected {
+		if got := server.DetectLevel(input); got != expected {
 			t.Fatalf("detectLevel(%q) = %v, want %v", input, got, expected)
 		}
 	}
@@ -33,10 +34,10 @@ func TestServerReadLoopDropsWhenQueueFull(t *testing.T) {
 	limits := config.DefaultLimits()
 	limits.MaxLineBytes = 256
 	eventCh := []chan<- model.LogEvent{make(chan model.LogEvent)}
-	srv := New(limits, eventCh)
+	srv := server.New(limits, eventCh)
 
 	var dropCount uint64
-	srv.SetStatsSink(func(update EngineStatsUpdate) {
+	srv.SetStatsSink(func(update server.EngineStatsUpdate) {
 		if update.Dropped > 0 {
 			atomic.AddUint64(&dropCount, update.Dropped)
 		}
@@ -48,12 +49,17 @@ func TestServerReadLoopDropsWhenQueueFull(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	state := &listenerState{id: "listener-1", ctx: ctx, cancel: cancel}
 
 	done := make(chan struct{})
+	var dropped uint64
 	go func() {
-		srv.readLoop(state, connReader)
-		close(done)
+		defer close(done)
+		count, err := srv.RunReadLoopForTest(ctx, connReader, "listener-1")
+		if err != nil {
+			t.Errorf("RunReadLoopForTest error: %v", err)
+			return
+		}
+		dropped = count
 	}()
 
 	go func() {
@@ -69,8 +75,8 @@ func TestServerReadLoopDropsWhenQueueFull(t *testing.T) {
 		t.Fatal("readLoop did not finish in time")
 	}
 
-	if got := atomic.LoadUint64(&state.dropped); got < 5 {
-		t.Fatalf("expected at least 5 drops recorded, got %d", got)
+	if dropped < 5 {
+		t.Fatalf("expected at least 5 drops recorded, got %d", dropped)
 	}
 	if dropCount < 5 {
 		t.Fatalf("expected at least 5 drop updates, got %d", dropCount)

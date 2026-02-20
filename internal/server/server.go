@@ -155,7 +155,7 @@ func (s *Server) readLoop(state *listenerState, conn net.Conn) {
 			if len(line) > s.limits.MaxLineBytes {
 				line = line[:s.limits.MaxLineBytes]
 			}
-			level := detectLevel(line)
+			level := DetectLevel(line)
 			evt := model.LogEvent{SourceKey: sourceKey, RemoteAddr: conn.RemoteAddr().String(), Line: line, ListenerID: state.id, Level: level}
 			shard := s.assignShard(sourceKey)
 			select {
@@ -169,6 +169,27 @@ func (s *Server) readLoop(state *listenerState, conn net.Conn) {
 				return
 			}
 		}
+	}
+}
+
+// RunReadLoopForTest executes readLoop with the provided connection and returns the drop count.
+func (s *Server) RunReadLoopForTest(ctx context.Context, conn net.Conn, listenerID string) (uint64, error) {
+	stateCtx, cancel := context.WithCancel(ctx)
+	state := &listenerState{id: listenerID, ctx: stateCtx, cancel: cancel}
+	atomic.AddInt64(&s.totalConns, 1)
+	atomic.AddInt64(&state.activeConns, 1)
+
+	done := make(chan struct{})
+	go func() {
+		s.readLoop(state, conn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return atomic.LoadUint64(&state.dropped), nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 }
 
@@ -279,7 +300,7 @@ func fnv32a(s string) uint32 {
 	return hash
 }
 
-func detectLevel(line string) model.Level {
+func DetectLevel(line string) model.Level {
 	upper := strings.ToUpper(line)
 	if strings.Contains(upper, "ERROR") || strings.Contains(upper, " ERR ") {
 		return model.LevelError
