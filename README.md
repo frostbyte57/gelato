@@ -1,4 +1,5 @@
 # Gelato
+![Uploading image-removebg-preview.png…]()
 
 Gelato is a local real-time log aggregation and monitoring tool for development and internal environments.
 
